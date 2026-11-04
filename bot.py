@@ -131,7 +131,7 @@ def process_message(message):
             "I will automatically:\n"
             "1. 🔒 Mirror the code to your private GitHub account.\n"
             "2. 💾 Archive versioned `.zip` to your Google Drive.\n"
-            "3. 📁 Send `.zip` document directly to your Telegram Channel.\n"
+            "3. 📁 Send `.zip` document directly to your Telegram Channel (`Git Repo Backup`).\n"
             "4. 📊 Log details into your Google Sheet!"
         )
         send_telegram_message(chat_id, welcome_msg, message_id)
@@ -142,31 +142,55 @@ def process_message(message):
         send_telegram_message(chat_id, "ℹ️ Please send a valid GitHub URL!\n_Example:_ `https://github.com/owner/repository`", message_id)
         return
 
+    # Check for duplicate entry BEFORE touching Sheet or triggering Workflow
+    current_content, _ = get_repos_txt_content()
+    tracked_lines = [l.strip() for l in current_content.splitlines() if l.strip() and not l.strip().startswith("#")]
+    
+    is_duplicate = False
+    for line in tracked_lines:
+        _, ex_repo, ex_canon = parse_github_url(line)
+        if (ex_repo and ex_repo.lower() == repo.lower()) or (ex_canon and ex_canon.lower() == canonical_url.lower()):
+            is_duplicate = True
+            break
+
+    private_mirror = f"https://github.com/{GITHUB_USER}/{repo}"
+    drive_folder = f"GitBackups/{repo}/"
+
+    if is_duplicate:
+        warning_msg = (
+            f"⚠️ *Repository Already Added & Tracked!*\n\n"
+            f"Yeh repository pehle se backup queue me maujood hai:\n\n"
+            f"📦 *Repo Name:* `{repo}`\n"
+            f"🌐 *Original:* {canonical_url}\n"
+            f"🔒 *Private Mirror:* {private_mirror}\n"
+            f"💾 *Google Drive:* `{drive_folder}`\n"
+            f"📁 *Telegram Channel:* `Git Repo Backup channel`\n\n"
+            f"ℹ️ _Duplicate entry Sheet me add nahi ki gayi hai._"
+        )
+        send_telegram_message(chat_id, warning_msg, message_id)
+        return
+
     send_telegram_message(chat_id, f"⏳ *Processing `{repo}`...*\nAdding to sync queue and triggering cloud backup...", message_id)
 
     # 1. Append to repos.txt
     success, msg = append_repo_to_github(canonical_url)
-    private_mirror = f"https://github.com/{GITHUB_USER}/{repo}"
-    drive_folder = f"GitBackups/{repo}/"
 
     # 2. Trigger workflow
     wf_success = trigger_github_workflow()
     drive_status = f"Sync & Backup Triggered ({drive_folder})" if wf_success else "Added to repos.txt (Sync pending)"
 
-    # 3. Log to Google Sheet
+    # 3. Log to Google Sheet (ONLY for new repo)
     sheet_res = log_to_google_sheet(repo, canonical_url, private_mirror, drive_status)
 
     # 4. Confirmation message
-    if success:
-        reply = "🚀 *Repository Successfully Added & Synced!*\n\n"
-    else:
-        reply = "ℹ️ *Repository Already Tracked!*\nTriggered fresh sync and updated sheet.\n\n"
-
-    reply += f"📦 *Repo Name:* `{repo}`\n"
-    reply += f"🌐 *Original:* {canonical_url}\n"
-    reply += f"🔒 *Private Mirror:* {private_mirror}\n"
-    reply += f"💾 *Google Drive:* `{drive_folder}`\n"
-    reply += f"📁 *Telegram Channel:* `Git Repo Backup`\n"
+    reply = (
+        f"🚀 *Repository Successfully Added & Synced!*\n\n"
+        f"📦 *Repo Name:* `{repo}`\n"
+        f"🌐 *Original:* {canonical_url}\n"
+        f"🔒 *Private Mirror:* {private_mirror}\n"
+        f"💾 *Google Drive:* `{drive_folder}`\n"
+        f"📁 *Telegram Channel:* `Git Repo Backup channel`\n"
+    )
     if sheet_res and sheet_res.get("status") == "success":
         reply += f"\n📊 *Logged in your Google Sheet!*"
     else:
