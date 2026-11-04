@@ -13,6 +13,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 GITHUB_PAT = os.getenv("GITHUB_PAT", "")
 GITHUB_SYNC_REPO = os.getenv("GITHUB_SYNC_REPO", "gitrepodevcoder/git-sync-hub")
 GITHUB_USER = os.getenv("GITHUB_USER", "gitrepodevcoder")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1004364399708")
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -90,10 +91,27 @@ def append_repo_to_github(canonical_url):
         print(f"Error updating repos.txt: {r.status_code} {r.text}")
         return False, f"GitHub Error {r.status_code}"
 
-def trigger_github_workflow():
+def reset_repos_txt():
+    current_content, sha = get_repos_txt_content()
+    clean_content = "# Add your GitHub repository URLs here (one per line)\n"
+    url = f"https://api.github.com/repos/{GITHUB_SYNC_REPO}/contents/repos.txt"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_PAT}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    payload = {
+        "message": "Reset repos.txt via /clean command",
+        "content": base64.b64encode(clean_content.encode("utf-8")).decode("ascii")
+    }
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=headers, json=payload)
+    return r.status_code in [200, 201]
+
+def trigger_github_workflow(workflow_name="sync-and-backup.yml"):
     if not GITHUB_PAT or not GITHUB_SYNC_REPO:
         return False
-    url = f"https://api.github.com/repos/{GITHUB_SYNC_REPO}/actions/workflows/sync-and-backup.yml/dispatches"
+    url = f"https://api.github.com/repos/{GITHUB_SYNC_REPO}/actions/workflows/{workflow_name}/dispatches"
     headers = {
         "Authorization": f"Bearer {GITHUB_PAT}",
         "Accept": "application/vnd.github.v3+json"
@@ -101,7 +119,7 @@ def trigger_github_workflow():
     r = requests.post(url, headers=headers, json={"ref": "main"})
     return r.status_code == 204
 
-def log_to_google_sheet(repo_name, original_link, private_mirror, drive_status):
+def log_to_google_sheet(repo_name, original_link, private_mirror, drive_status, action=None):
     if not WEBHOOK_URL:
         return None
     try:
@@ -111,18 +129,117 @@ def log_to_google_sheet(repo_name, original_link, private_mirror, drive_status):
             "private_mirror": private_mirror,
             "drive_status": drive_status
         }
+        if action:
+            payload["action"] = action
         r = requests.post(WEBHOOK_URL, json=payload, timeout=20)
         return r.json()
     except Exception as e:
         print(f"Error logging to Google Sheet: {e}")
         return None
 
+def clean_telegram_channel():
+    try:
+        marker_res = requests.post(
+            f"{TELEGRAM_API_BASE}/sendMessage",
+            json={"chat_id": TELEGRAM_CHANNEL_ID, "text": "🧹 *Channel Resetting...*", "parse_mode": "Markdown"},
+            timeout=10
+        )
+        if marker_res.status_code == 200:
+            max_id = marker_res.json()["result"]["message_id"]
+            for mid in range(max_id, max(1, max_id - 60), -1):
+                try:
+                    requests.post(
+                        f"{TELEGRAM_API_BASE}/deleteMessage",
+                        json={"chat_id": TELEGRAM_CHANNEL_ID, "message_id": mid},
+                        timeout=2
+                    )
+                except Exception:
+                    pass
+        requests.post(
+            f"{TELEGRAM_API_BASE}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHANNEL_ID,
+                "text": "✨ *Channel Cleaned & Ready!*\nAll previous backup archives have been cleared. Ready for fresh repository backups.",
+                "parse_mode": "Markdown"
+            },
+            timeout=10
+        )
+        return True
+    except Exception as e:
+        print(f"Error cleaning channel: {e}")
+        return False
+
+def handle_clean_command(chat_id, message_id):
+    send_telegram_message(
+        chat_id,
+        "🧹 *Initiating Full Cleanup...*\n\n"
+        "1. 💾 Google Drive: Purging `GitBackups/` via Cloud Action...\n"
+        "2. 📁 Telegram Channel: Deleting backup files...\n"
+        "3. 📋 repos.txt: Resetting queue...\n"
+        "4. 📊 Google Sheet: Sending clear signal...",
+        message_id
+    )
+
+    # 1. Get tracked repos before reset
+    content, _ = get_repos_txt_content()
+    tracked_repos = []
+    for line in content.splitlines():
+        if line.strip() and not line.strip().startswith("#"):
+            _, r_name, _ = parse_github_url(line)
+            if r_name:
+                tracked_repos.append(r_name)
+
+    # 2. Trigger Google Drive purge workflow
+    drive_clean = trigger_github_workflow("clean-drive.yml")
+
+    # 3. Clean Telegram channel
+    tg_clean = clean_telegram_channel()
+
+    # 4. Reset repos.txt
+    repo_reset = reset_repos_txt()
+
+    # 5. Clean Google Sheet
+    sheet_clean = log_to_google_sheet("", "", "", "", action="clean_all")
+
+    # 6. Attempt deleting mirrored GitHub repos
+    deleted_repos = []
+    failed_repos = []
+    headers = {"Authorization": f"Bearer {GITHUB_PAT}", "Accept": "application/vnd.github.v3+json"}
+    for r_name in tracked_repos:
+        del_r = requests.delete(f"https://api.github.com/repos/{GITHUB_USER}/{r_name}", headers=headers)
+        if del_r.status_code == 204:
+            deleted_repos.append(r_name)
+        else:
+            failed_repos.append(r_name)
+
+    # Summary
+    reply = "✅ *Cleanup Completed Successfully!*\n\n"
+    reply += f"💾 *Google Drive:* `GitBackups/` purged\n"
+    reply += f"📁 *Telegram Channel:* Documents cleared & channel refreshed\n"
+    reply += f"📋 *repos.txt:* Reset to clean state (0 queued)\n"
+    reply += f"📊 *Google Sheet:* Reset signal sent\n"
+
+    if deleted_repos:
+        reply += f"🔒 *GitHub Mirrored Repos Deleted:* {', '.join(deleted_repos)}\n"
+    if failed_repos:
+        reply += (
+            f"\nℹ️ *Note on GitHub Repos ({', '.join(failed_repos)}):*\n"
+            f"GitHub PAT lacks `delete_repo` permission. Aap repo Settings ➡️ Danger Zone se 1-click delete kar sakte hain, ya PAT me `delete_repo` scope on kar sakte hain."
+        )
+
+    send_telegram_message(chat_id, reply, message_id)
+
 def process_message(message):
     chat_id = message["chat"]["id"]
     text = message.get("text") or message.get("caption") or ""
     message_id = message["message_id"]
 
-    if text.strip().startswith("/start"):
+    clean_text = text.strip().lower()
+    if clean_text in ["/clean", "/reset", "clean", "reset"]:
+        handle_clean_command(chat_id, message_id)
+        return
+
+    if clean_text.startswith("/start"):
         welcome_msg = (
             "👋 *Welcome to GitHub Repo Sync & Backup Bot!*\n\n"
             "Send me any GitHub repository link:\n"
@@ -131,15 +248,17 @@ def process_message(message):
             "I will automatically:\n"
             "1. 🔒 Mirror the code to your private GitHub account.\n"
             "2. 💾 Archive versioned `.zip` to your Google Drive.\n"
-            "3. 📁 Send `.zip` document directly to your Telegram Channel (`Git Repo Backup`).\n"
-            "4. 📊 Log details into your Google Sheet!"
+            "3. 📁 Send `.zip` document directly to your Telegram Channel (`Git Repo Backup channel`).\n"
+            "4. 📊 Log details into your Google Sheet!\n\n"
+            "🧹 *Commands:*\n"
+            "• `/clean` - Purge Google Drive, clear channel messages, reset Sheet and queue."
         )
         send_telegram_message(chat_id, welcome_msg, message_id)
         return
 
     owner, repo, canonical_url = parse_github_url(text)
     if not owner or not repo:
-        send_telegram_message(chat_id, "ℹ️ Please send a valid GitHub URL!\n_Example:_ `https://github.com/owner/repository`", message_id)
+        send_telegram_message(chat_id, "ℹ️ Please send a valid GitHub URL!\n_Example:_ `https://github.com/owner/repository`\n\nOr use `/clean` to reset all backups.", message_id)
         return
 
     # Check for duplicate entry BEFORE touching Sheet or triggering Workflow
@@ -176,7 +295,7 @@ def process_message(message):
     success, msg = append_repo_to_github(canonical_url)
 
     # 2. Trigger workflow
-    wf_success = trigger_github_workflow()
+    wf_success = trigger_github_workflow("sync-and-backup.yml")
     drive_status = f"Sync & Backup Triggered ({drive_folder})" if wf_success else "Added to repos.txt (Sync pending)"
 
     # 3. Log to Google Sheet (ONLY for new repo)
