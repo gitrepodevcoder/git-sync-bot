@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
 # Configuration from Environment Variables
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9111460803:AAFJSKUSowl7-5_b8xmlUPmqp6ECN53Sfwc")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 GITHUB_PAT = os.getenv("GITHUB_PAT", "")
 GITHUB_SYNC_REPO = os.getenv("GITHUB_SYNC_REPO", "gitrepodevcoder/git-sync-hub")
