@@ -263,7 +263,7 @@ def handle_list_command(chat_id, message_id=None):
     if not tracked_lines:
         msg = (
             "📋 *Tracked Repositories List*\n\n"
-            "ℹ️ _Abhi koi bhi repository backup queue me nahi hai (0 repos maujood hain).\n\n"
+            "ℹ️ _Abhi koi bhi repository backup queue me nahi hai (0 repos maujood hain)._\n\n"
             "Kisi bhi GitHub repo ka link bhejein, woh automatically sync aur backup ho jayegi!"
         )
         send_telegram_message(chat_id, msg, message_id)
