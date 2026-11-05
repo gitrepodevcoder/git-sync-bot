@@ -17,6 +17,33 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "-1004364399708")
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Local Sync Trigger Management
+LOCAL_SYNC_LOCK = threading.Lock()
+local_sync_request = None  # {'chat_id': ..., 'message_id': ..., 'created_at': ..., 'auto': bool}
+
+def set_local_sync_trigger(chat_id, message_id, auto=False):
+    global local_sync_request
+    with LOCAL_SYNC_LOCK:
+        local_sync_request = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'created_at': time.time(),
+            'auto': auto
+        }
+
+def get_local_sync_trigger():
+    global local_sync_request
+    with LOCAL_SYNC_LOCK:
+        if local_sync_request and (time.time() - local_sync_request['created_at']) < (20 * 60):
+            return local_sync_request
+        return None
+
+def clear_local_sync_trigger():
+    global local_sync_request
+    with LOCAL_SYNC_LOCK:
+        local_sync_request = None
+
+
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
     url = f"{TELEGRAM_API_BASE}/sendMessage"
     payload = {
@@ -227,6 +254,8 @@ def handle_clean_command(chat_id, message_id):
             f"GitHub PAT lacks `delete_repo` permission. Aap repo Settings ➡️ Danger Zone se 1-click delete kar sakte hain, ya PAT me `delete_repo` scope on kar sakte hain."
         )
 
+        # Also set local sync trigger so if PC & disk are connected, it automatically downloads!
+    set_local_sync_trigger(chat_id, message_id, auto=True)
     send_telegram_message(chat_id, reply, message_id)
 
 def process_message(message):
@@ -238,6 +267,19 @@ def process_message(message):
     if clean_text in ["/clean", "/reset", "clean", "reset"]:
         handle_clean_command(chat_id, message_id)
         return
+
+    if clean_text in ["/synclocal", "synclocal", "/sync_local", "/sync_disk", "/syncpc"]:
+        set_local_sync_trigger(chat_id, message_id, auto=False)
+        send_telegram_message(
+            chat_id,
+            "⏳ *Local Sync Signal Sent to PC!*\n\n"
+            "• Checking if your laptop is online...\n"
+            "• Checking 2 TB Hard Disk (`GIt Repos`)...\n\n"
+            "Agar laptop on hai aur hard disk connected hai, toh download turant shuru ho jayega aur complete hone par report yahi aayegi!",
+            message_id
+        )
+        return
+
 
     if clean_text.startswith("/start"):
         welcome_msg = (
@@ -251,7 +293,7 @@ def process_message(message):
             "3. 📁 Send `.zip` document directly to your Telegram Channel (`Git Repo Backup channel`).\n"
             "4. 📊 Log details into your Google Sheet!\n\n"
             "🧹 *Commands:*\n"
-            "• `/clean` - Purge Google Drive, clear channel messages, reset Sheet and queue."
+            "• `/synclocal` - Sync latest repositories directly to your connected 2 TB Hard Disk!\n• `/clean` - Purge Google Drive, clear channel messages, reset Sheet and queue."
         )
         send_telegram_message(chat_id, welcome_msg, message_id)
         return
@@ -315,18 +357,67 @@ def process_message(message):
     else:
         reply += f"\n📊 *Sheet:* Connected"
 
+        # Also set local sync trigger so if PC & disk are connected, it automatically downloads!
+    set_local_sync_trigger(chat_id, message_id, auto=True)
     send_telegram_message(chat_id, reply, message_id)
 
 # Webhook Server for Render
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(b"Git Sync Bot Webhook Server is Live!")
+        if self.path == "/local-sync/poll":
+            trig = get_local_sync_trigger()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            if trig:
+                self.wfile.write(json.dumps({"sync": True, "chat_id": trig["chat_id"]}).encode('utf-8'))
+            else:
+                self.wfile.write(json.dumps({"sync": False}).encode('utf-8'))
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b"Git Sync Bot Webhook Server is Live!")
 
     def do_POST(self):
-        if self.path in ["/webhook", "/"]:
+        if self.path == "/local-sync/complete":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status": "ok"}')
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+                chat_id = data.get("chat_id") or TELEGRAM_CHANNEL_ID
+                status = data.get("status")
+                if status == "success":
+                    stats = data.get("stats", {})
+                    drive = data.get("drive", "E:")
+                    free_gb = data.get("free_gb", 0)
+                    msg = (
+                        "✅ *Local Hard Disk Sync Completed!*\n\n"
+                        f"💾 *Drive:* `{drive}\\ (GIt Repos)`\n"
+                        f"📦 *Total Tracked:* `{stats.get('total', 0)}`\n"
+                        f"⏩ *Up-to-Date (Skipped):* `{stats.get('skipped', 0)}`\n"
+                        f"📥 *New Cloned:* `{stats.get('cloned', 0)}`\n"
+                        f"🔄 *Updated:* `{stats.get('updated', 0)}`\n"
+                        f"💾 *Remaining Space:* `{free_gb} GB`\n"
+                        f"📁 *Folder:* `{drive}\\GitBackups`"
+                    )
+                    send_telegram_message(chat_id, msg)
+                elif status == "no_disk":
+                    msg = (
+                        "⚠️ *Local Sync Notice:*\n"
+                        "Laptop is online, but Hard Disk `GIt Repos` is not connected.\n"
+                        "Please plug in your 2 TB external drive to sync locally."
+                    )
+                    send_telegram_message(chat_id, msg)
+            except Exception as e:
+                print(f"Error handling sync complete: {e}")
+            finally:
+                clear_local_sync_trigger()
+        elif self.path in ["/webhook", "/"]:
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             self.send_response(200)
