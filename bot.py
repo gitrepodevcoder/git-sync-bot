@@ -254,9 +254,53 @@ def handle_clean_command(chat_id, message_id):
             f"GitHub PAT lacks `delete_repo` permission. Aap repo Settings ➡️ Danger Zone se 1-click delete kar sakte hain, ya PAT me `delete_repo` scope on kar sakte hain."
         )
 
-        # Also set local sync trigger so if PC & disk are connected, it automatically downloads!
-    set_local_sync_trigger(chat_id, message_id, auto=True)
     send_telegram_message(chat_id, reply, message_id)
+
+def handle_list_command(chat_id, message_id=None):
+    content, _ = get_repos_txt_content()
+    tracked_lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+
+    if not tracked_lines:
+        msg = (
+            "📋 *Tracked Repositories List*\n\n"
+            "ℹ️ _Abhi koi bhi repository backup queue me nahi hai (0 repos maujood hain).\n\n"
+            "Kisi bhi GitHub repo ka link bhejein, woh automatically sync aur backup ho jayegi!"
+        )
+        send_telegram_message(chat_id, msg, message_id)
+        return
+
+    total = len(tracked_lines)
+    header = f"📋 *Tracked Repositories List ({total} Total)*\n\n"
+
+    messages = []
+    current_chunk = header
+
+    for idx, line in enumerate(tracked_lines, 1):
+        _, repo, canonical_url = parse_github_url(line)
+        if repo and canonical_url:
+            private_mirror = f"https://github.com/{GITHUB_USER}/{repo}"
+            entry = (
+                f"{idx}. 📦 *{repo}*\n"
+                f"   🌐 *Original:* {canonical_url}\n"
+                f"   🔒 *Mirror:* {private_mirror}\n"
+                f"   💾 *Drive:* `GitBackups/{repo}/`\n\n"
+            )
+        else:
+            entry = f"{idx}. 🌐 `{line}`\n\n"
+
+        if len(current_chunk) + len(entry) > 3500:
+            messages.append(current_chunk)
+            current_chunk = entry
+        else:
+            current_chunk += entry
+
+    if current_chunk:
+        messages.append(current_chunk)
+
+    for i, chunk in enumerate(messages):
+        if i == len(messages) - 1:
+            chunk += "💡 _Tip: Run `/synclocal` to download all to 2 TB Hard Disk, or `/clean` to reset._"
+        send_telegram_message(chat_id, chunk, message_id if i == 0 else None)
 
 def process_message(message):
     chat_id = message["chat"]["id"]
@@ -266,6 +310,10 @@ def process_message(message):
     clean_text = text.strip().lower()
     if clean_text in ["/clean", "/reset", "clean", "reset"]:
         handle_clean_command(chat_id, message_id)
+        return
+
+    if clean_text in ["/list", "list", "/repos", "repos", "/all"]:
+        handle_list_command(chat_id, message_id)
         return
 
     if clean_text in ["/synclocal", "synclocal", "/sync_local", "/sync_disk", "/syncpc"]:
@@ -293,7 +341,7 @@ def process_message(message):
             "3. 📁 Send `.zip` document directly to your Telegram Channel (`Git Repo Backup channel`).\n"
             "4. 📊 Log details into your Google Sheet!\n\n"
             "🧹 *Commands:*\n"
-            "• `/synclocal` - Sync latest repositories directly to your connected 2 TB Hard Disk!\n• `/clean` - Purge Google Drive, clear channel messages, reset Sheet and queue."
+            "• `/list` - View all tracked & backed up repositories\n• `/synclocal` - Sync latest repositories directly to your connected 2 TB Hard Disk!\n• `/clean` - Purge Google Drive, clear channel messages, reset Sheet and queue."
         )
         send_telegram_message(chat_id, welcome_msg, message_id)
         return
