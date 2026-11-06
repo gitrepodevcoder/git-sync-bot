@@ -256,6 +256,55 @@ def handle_clean_command(chat_id, message_id):
 
     send_telegram_message(chat_id, reply, message_id)
 
+REPO_SKIP_CACHE = {}
+
+def get_skipped_gdrive_repos():
+    if not GITHUB_PAT or not GITHUB_SYNC_REPO:
+        return set()
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_SYNC_REPO}/contents/skipped_gdrive.txt"
+        headers = {
+            "Authorization": f"Bearer {GITHUB_PAT}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()["content"]).decode("utf-8")
+            return set(line.strip().lower() for line in content.splitlines() if line.strip())
+    except Exception as e:
+        print(f"Error fetching skipped_gdrive.txt: {e}")
+    return set()
+
+def is_repo_gdrive_skipped(owner, repo, skipped_set=None):
+    if skipped_set and repo.lower() in skipped_set:
+        return True
+
+    cache_key = f"{owner}/{repo}".lower()
+    if cache_key in REPO_SKIP_CACHE:
+        return REPO_SKIP_CACHE[cache_key]
+
+    if "openclaw" in repo.lower():
+        REPO_SKIP_CACHE[cache_key] = True
+        return True
+
+    try:
+        url = f"https://api.github.com/repos/{owner}/{repo}"
+        headers = {
+            "Authorization": f"Bearer {GITHUB_PAT}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            size_kb = r.json().get("size", 0)
+            is_skipped = size_kb >= (1024 * 1024)
+            REPO_SKIP_CACHE[cache_key] = is_skipped
+            return is_skipped
+    except Exception as e:
+        print(f"Error checking repo size for {owner}/{repo}: {e}")
+
+    REPO_SKIP_CACHE[cache_key] = False
+    return False
+
 def handle_list_command(chat_id, message_id=None):
     content, _ = get_repos_txt_content()
     tracked_lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
@@ -274,16 +323,25 @@ def handle_list_command(chat_id, message_id=None):
 
     messages = []
     current_chunk = header
+    skipped_set = get_skipped_gdrive_repos()
 
     for idx, line in enumerate(tracked_lines, 1):
-        _, repo, canonical_url = parse_github_url(line)
+        owner, repo, canonical_url = parse_github_url(line)
         if repo and canonical_url:
             private_mirror = f"https://github.com/{GITHUB_USER}/{repo}"
+            is_skipped = is_repo_gdrive_skipped(owner, repo, skipped_set)
+            if is_skipped:
+                skip_tag = " (skipped Gdrive Bckup because of size.)"
+                drive_line = "   💾 *Drive:* (skipped Gdrive Bckup because of size.)\n\n"
+            else:
+                skip_tag = ""
+                drive_line = f"   💾 *Drive:* `GitBackups/{repo}/`\n\n"
+
             entry = (
-                f"{idx}. 📦 *{repo}*\n"
+                f"{idx}. 📦 *{repo}*{skip_tag}\n"
                 f"   🌐 *Original:* {canonical_url}\n"
                 f"   🔒 *Mirror:* {private_mirror}\n"
-                f"   💾 *Drive:* `GitBackups/{repo}/`\n\n"
+                f"{drive_line}"
             )
         else:
             entry = f"{idx}. 🌐 `{line}`\n\n"
